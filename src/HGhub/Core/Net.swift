@@ -125,7 +125,9 @@ final class Net: Sendable {
         var initial = Net.defaultBase
         if let data = try? Data(contentsOf: AppPaths.file("line.json")),
            let v = try? JSON.parse(data), let b = v["base"].string, let n = Net.normalize(b) {
-            initial = n
+            // 老版本把 huangguoai.ai 当固定线路存过：它是地址入口页，没有 edge 接口（404），
+            // 启动时直接迁回官网，免得用户一直卡在 404。
+            initial = (n == "https://huangguoai.ai") ? Net.defaultBase : n
         }
         baseState = Mutex(initial)
         sessionState = Mutex(Net.makeSession())

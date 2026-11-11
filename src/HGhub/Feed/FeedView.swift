@@ -52,6 +52,9 @@ struct FeedView: View {
     @State private var boostLocked = false
     /// 根视图尺寸（缩放铺满 / 平移夹取用）
     @State private var viewSize: CGSize = .zero
+    /// 缩放快捷按钮是否显示（几秒后自动收起，再捏一次又出来）
+    @State private var zoomHUD = false
+    @State private var zoomHUDTask: Task<Void, Never>?
     /// 左右滑动调进度：拖动中的目标时间（nil 表示没在拖）
     @State private var scrub: Double?
     /// 开始拖时的播放位置
@@ -61,6 +64,9 @@ struct FeedView: View {
     @State private var slowToken = 0
     /// 这次播放已经自动切过几次线路（防止来回跳）
     @State private var autoLineTries = 0
+    /// 播放失败后的「原地重试」次数：CDN 偶发 403，换条连接重拉播放列表通常就好，
+    /// 不应该一失败就切线路（切线路解决不了 CDN 抖动，还会把用户选的线路改掉）
+    @State private var mediaRetries = 0
     @State private var switchingLine = false
     @FocusState private var focused: Bool
 
@@ -163,6 +169,17 @@ struct FeedView: View {
             #endif
             engine.onEnded = { advanceEpisode() }
             feed.prefetch(ids, around: index)
+            // 仅调试：-HGRoute pinch 用来在模拟器上验证缩放 HUD（macOS 没有缩放手势）
+            #if os(iOS)
+            if DebugRoute.is("pinch") {
+                Task {
+                    try? await Task.sleep(for: .seconds(4))
+                    zoomBase = 1.6
+                    withAnimation(.smooth(duration: 0.28)) { zoom = 1.6 }
+                    showZoomHUD()
+                }
+            }
+            #endif
             if mode == .home, let p = DebugRoute.value,
                ["episodes", "comments", "info", "clean", "paused", "immersive", "landscape", "rotate"].contains(p) {
                 Task {
@@ -207,6 +224,9 @@ struct FeedView: View {
             // 换一条：缩放、平移、锁定的倍速都回到默认
             zoom = 1; zoomBase = 1; panOffset = .zero; panBase = .zero
             if boostLocked { boostLocked = false; engine.boosted = false }
+            #if os(iOS)
+            hideZoomHUD()
+            #endif
         }
         .onChange(of: ids.count) { _, _ in feed.prefetch(ids, around: index) }
         .onChange(of: engine.time) { _, t in
@@ -216,11 +236,12 @@ struct FeedView: View {
         .onChange(of: engine.error) { _, e in
             guard let e else { return }
             playError = e
-            switchLineIfNeeded()
+            retryPlaybackInPlace()
         }
         .onChange(of: engine.isReady) { _, ok in
             if ok {
                 autoLineTries = 0
+                mediaRetries = 0
                 app.lineOK()
                 slowLoad = false
                 // 主播放器接上了，这才轮到预载下下条
@@ -275,7 +296,11 @@ struct FeedView: View {
             .scrollPosition(id: $position)
             // .never：拖动翻页时也不弹出右侧滚动条（macOS 上 .hidden 仍会闪一下）
             .scrollIndicators(.never)
+            #if os(iOS)
             .scrollDisabled(app.immersive || zoom > 1.01)
+            #else
+            .scrollDisabled(app.immersive)
+            #endif
             #if os(macOS)
             // 不再给 ScrollView 叠加手写位移：位移 + 原生分页同时动画时中间会露黑
             .gesture(swipePaging)
@@ -325,17 +350,24 @@ struct FeedView: View {
         } onPressingChanged: { pressing in
             if !pressing, engine.boosted, !boostLocked { engine.boosted = false }
         }
-        // 双指无级缩放 1x ~ 3.5x；放大后单指拖动平移
+        #if os(iOS)
+        // 双指无级缩放 1x ~ 3.5x；放大后单指拖动平移（仅 iOS / iPadOS）
         .simultaneousGesture(
             MagnifyGesture(minimumScaleDelta: 0.01)
                 .onChanged { v in
                     guard visible else { return }
                     zoom = min(3.5, max(1, zoomBase * v.magnification))
                     if zoom <= 1.01 { panOffset = .zero }
+                    if zoom > 1.01, !zoomHUD { showZoomHUD() }
                 }
                 .onEnded { _ in
                     zoomBase = zoom
-                    if zoom <= 1.01 { zoom = 1; panOffset = .zero; panBase = .zero }
+                    if zoom <= 1.01 {
+                        zoom = 1; panOffset = .zero; panBase = .zero
+                        hideZoomHUD()
+                    } else {
+                        showZoomHUD()          // 松手后重新计时
+                    }
                 }
         )
         // 只有放大之后才吃拖动：没放大时用 .infinity 让翻页手势正常工作
@@ -348,6 +380,7 @@ struct FeedView: View {
                 }
                 .onEnded { _ in if zoom > 1.01 { clampPan(viewSize) } }
         )
+        #endif
     }
 
     /// 控件层放在滚动内容之外：遵守安全区（不会钻到 Mac 侧边栏 / iPhone 刘海下面），且只有一份
@@ -359,7 +392,9 @@ struct FeedView: View {
             }
             stateOverlay
             HeartBurst(trigger: heartBurst)
+            #if os(iOS)
             zoomShortcuts
+            #endif
             boostLockBadge
             FeedOverlay(
                 id: currentId, detail: detail, ep: currentEp, mode: mode, compact: hSize == .compact,
@@ -367,6 +402,8 @@ struct FeedView: View {
                 onLike: like, onFav: fav, onFollow: follow,
                 onComments: { panel = .comments }, onEpisodes: { panel = .episodes }, onInfo: { panel = .info },
                 onImmersive: { setImmersive(!app.immersive) },
+                isFilled: fillActive,
+                onToggleFill: fillToggle,
                 onNextEp: advanceEpisode
             )
         }
@@ -385,34 +422,87 @@ struct FeedView: View {
         .animation(.smooth(duration: 0.25), value: app.clean)
     }
 
-    /// 放大状态下的快捷切换：铺满 / 适应 / 还原
+    /// 控制条上的「铺满 / 适应」：只有 iOS / iPadOS 有缩放
+    private var fillActive: Bool {
+        #if os(iOS)
+        zoom > 1.01
+        #else
+        false
+        #endif
+    }
+
+    private var fillToggle: (() -> Void)? {
+        #if os(iOS)
+        { toggleFill() }
+        #else
+        nil
+        #endif
+    }
+
+    #if os(iOS)
+    /// 放大状态下的快捷切换（图标版）：铺满 / 适应 / 还原（仅 iOS / iPadOS）
+    /// 只在捏合后短暂出现，几秒后自动收起；再捏一次会重新出现。
     @ViewBuilder private var zoomShortcuts: some View {
-        if zoom > 1.01 {
+        if zoomHUD, zoom > 1.01 {
             VStack {
                 Spacer()
-                HStack(spacing: 8) {
-                    zoomButton("放大铺满") { setZoom(fillZoom(viewSize)) }
-                    zoomButton("完整适应") { setZoom(1) }
-                    zoomButton("还原缩放") { setZoom(1); panOffset = .zero; panBase = .zero }
+                Button {
+                    setZoom(1)
+                    panOffset = .zero
+                    panBase = .zero
+                    hideZoomHUD()
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .contentShape(.circle)
                 }
-                .padding(6)
-                .glassEffect(.clear, in: .capsule)
-                .padding(.bottom, 132)
+                .buttonStyle(.plain)
+                .glassEffect(.clear.interactive(), in: .circle)
+                .accessibilityLabel("还原缩放")
+                .help("还原缩放")
+                .offset(y: 84)      // 落在中央播放键下面一点
+                Spacer()
             }
-            .transition(.opacity)
+            .transition(.opacity.combined(with: .scale(scale: 0.96)))
         }
     }
 
-    private func zoomButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .contentShape(.capsule)
+    /// 铺满 / 适应切换
+    private func toggleFill() {
+        #if os(iOS)
+        if zoom > 1.01 {
+            setZoom(1)
+            panOffset = .zero
+            panBase = .zero
+            hideZoomHUD()
+        } else {
+            setZoom(fillZoom(viewSize))
+            showZoomHUD()
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.white)
+        #endif
     }
+
+    /// 捏合后显示，3 秒后自动收起
+    private func showZoomHUD() {
+        zoomHUDTask?.cancel()
+        if !zoomHUD {
+            withAnimation(.smooth(duration: 0.18)) { zoomHUD = true }
+        }
+        zoomHUDTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            withAnimation(.smooth(duration: 0.25)) { zoomHUD = false }
+        }
+    }
+
+    private func hideZoomHUD() {
+        zoomHUDTask?.cancel()
+        zoomHUDTask = nil
+        withAnimation(.smooth(duration: 0.2)) { zoomHUD = false }
+    }
+    #endif
 
     private func setZoom(_ z: CGFloat) {
         withAnimation(.smooth(duration: 0.28)) {
@@ -454,8 +544,11 @@ struct FeedView: View {
             if i == index { pip.attach(layer) }
         }
         .frame(width: size.width, height: size.height)
+        #if os(iOS)
+        // 双指缩放只做在 iOS / iPadOS：macOS 用触控板捏合去缩放视频不自然
         .scaleEffect(zoom, anchor: .center)
         .offset(panOffset)
+        #endif
         .frame(width: size.width, height: size.height)
         .clipped()
         .animation(.smooth(duration: 0.28), value: zoom)
@@ -672,6 +765,24 @@ struct FeedView: View {
                   ids.indices.contains(index + 1), ids[index + 1] == nextId else { return }
             // 相邻页那只播放器提前把这条装好并停在第一帧：翻过去直接是画面
             engine.prepare(index: index + 1, source: info.url, key: "\(nextId)-\(ep)", autoplay: false)
+        }
+    }
+
+    /// 播放器报错（多为 CDN 偶发 403）时，先在原线路原地重试两次：
+    /// 清播放列表缓存 → 重新解析播放地址 → 重建 item；两次都不行才让 AppModel 切线路。
+    private func retryPlaybackInPlace() {
+        guard visible, currentId > 0 else { return }
+        // 只重试一次、隔 2.5 秒：CDN 有防攻击策略，重试太密会被当成刷流量
+        guard mediaRetries < 1 else { mediaRetries = 0; return }
+        mediaRetries += 1
+        Media.playlistCache.clear()
+        feed.invalidate(currentId, ep: currentEp)
+        engine.stop()
+        loadedKey = ""
+        Task {
+            try? await Task.sleep(for: .milliseconds(2500))
+            guard !Task.isCancelled else { return }
+            retryToken += 1
         }
     }
 

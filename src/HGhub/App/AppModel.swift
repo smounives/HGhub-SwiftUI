@@ -134,6 +134,8 @@ final class AppModel {
     private(set) var lineSwitchToken = 0
     @ObservationIgnored private var switchingLine = false
     @ObservationIgnored private var lineTries = 0
+    /// 上次自动切线路的时间（30 秒冷却）
+    @ObservationIgnored private var lastAutoSwitch: Date?
     /// 当前线路播放失败时自动切到延迟最低的可用线路
     var autoLine = true { didSet { save() } }
     /// IPv6 优先（DNS 优先解析 AAAA，选线路时优先挑有 IPv6 的）
@@ -225,7 +227,10 @@ final class AppModel {
     /// 返回是否真的切了，调用方据此决定要不要重试。
     @discardableResult
     func autoSwitchLine() async -> Bool {
+        // 冷却 30 秒：线路探测本身是一串请求，太频繁同样会触发 CDN 防刷
+        if let t = lastAutoSwitch, Date().timeIntervalSince(t) < 30 { return false }
         guard autoLine, !switchingLine, lineTries < 3 else { return false }
+        lastAutoSwitch = Date()
         switchingLine = true
         lineTries += 1
         defer { switchingLine = false }

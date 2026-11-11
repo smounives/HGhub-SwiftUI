@@ -21,6 +21,10 @@ struct FeedOverlay: View {
     var onEpisodes: () -> Void
     var onInfo: () -> Void
     var onImmersive: () -> Void
+    /// 是否处于「铺满」状态（只有 iOS / iPadOS 有缩放）
+    var isFilled: Bool = false
+    /// non-nil 时在控制条上显示「铺满 / 适应」切换（macOS 传 nil 隐藏）
+    var onToggleFill: (() -> Void)? = nil
     var onNextEp: () -> Void
 
     @Environment(AppModel.self) private var app
@@ -49,7 +53,7 @@ struct FeedOverlay: View {
                 }
                 ControlBar(engine: engine, compact: compact, tight: tight, pip: pip, epLabel: epLabel,
                            onImmersive: onImmersive, onNextEp: onNextEp, immersive: app.immersive,
-                           railWidth: m.hit.width)
+                           railWidth: m.hit.width, isFilled: isFilled, onToggleFill: onToggleFill)
                     .offset(y: hidden ? 120 : 0)
                     .opacity(hidden ? 0 : 1)
             }
@@ -304,6 +308,8 @@ struct ControlBar: View {
     var immersive: Bool
     /// 右侧操作栏图标的外框宽度：全屏键按它对齐，圆心与上面那排按钮同一条竖线
     var railWidth: CGFloat = 0
+    var isFilled: Bool = false
+    var onToggleFill: (() -> Void)? = nil
 
     @Environment(AppModel.self) private var app
     @State private var scrubbing: Double?
@@ -362,6 +368,10 @@ struct ControlBar: View {
                         .controlSize(.small)
                         .accessibilityLabel("音量")
                     #endif
+                    if let toggle = onToggleFill {
+                        glassIcon(isFilled ? "aspectratio" : "aspectratio.fill",
+                                  isFilled ? "完整适应" : "放大铺满", action: toggle)
+                    }
                     if pip.isSupported {
                         glassIcon("pip.enter", "画中画") { pip.toggle() }
                     }

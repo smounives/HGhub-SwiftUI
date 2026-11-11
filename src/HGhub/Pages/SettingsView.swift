@@ -30,8 +30,6 @@ struct SettingsView: View {
                 Toggle("预载下一个视频", systemImage: "square.stack.3d.down.right", isOn: $app.preloadNext)
             } header: {
                 Text("播放")
-            } footer: {
-                Text("开启后会在播放当前视频时，提前取好下一条的播放地址与播放列表，翻页少两跳网络、起播更快。")
             }
 
             Section {
@@ -42,8 +40,6 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("本地数据")
-            } footer: {
-                Text("只清除封面与播放列表缓存。收藏、观看记录、搜索历史与登录状态都会保留。")
             }
 
             Section("网络") {
@@ -170,8 +166,6 @@ struct LinesView: View {
 
                 Section {
                     Toggle("自动切换线路", isOn: Binding(get: { app.autoLine }, set: { app.autoLine = $0 }))
-                } footer: {
-                    Text("播放失败时自动测速，并切到延迟最低的可用线路；切换结果会同步到这里的「当前线路」。")
                 }
 
                 Section {
@@ -181,10 +175,8 @@ struct LinesView: View {
                     Toggle("严格安全模式", isOn: Binding(get: { app.strictSecurity }, set: { app.strictSecurity = $0 }))
                 } header: {
                     Text("网络加固")
-                } footer: {
-                    Text("IPv6 优先：先解析 AAAA，选线路时优先挑支持 IPv6 的；连接复用：30 秒内不重建会话，省掉重复 TLS 握手；4xx 快速失败：4xx 不再重试；严格安全模式：拒绝内网/回环地址，正文只保留白名单标签。")
                 }
-                Section("固定线路") {
+                Section("官方线路") {
                     ForEach(sorted(Lines.fixed)) { row($0) }
                 }
                 Section {
@@ -203,8 +195,6 @@ struct LinesView: View {
                         Spacer()
                         if !mirrors.isEmpty { Text("\(mirrors.count) 条").foregroundStyle(.secondary) }
                     }
-                } footer: {
-                    Text("来自 \(Lines.publishPage)。点右上角「测速」后按延迟从小到大排序。")
                 }
                 Section("自定义") {
                     HStack {

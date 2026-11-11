@@ -28,8 +28,9 @@ enum Lines {
     }
 
     static let fixed: [Line] = [
-        Line(name: "固定线路 1", url: "https://huangguoai.com"),
-        Line(name: "固定线路 2", url: "https://huangguoai.ai"),
+        // 只保留官网这一条固定线路：huangguoai.ai 是「地址入口页」，没有 edge 接口（404）；
+        // 其余可用线路由地址发布页自动拉取（镜像线路 + 测速）。
+        Line(name: "官方线路", url: "https://huangguoai.com"),
     ]
 
     static let publishPage = "https://huangguoai.pages.dev/"
@@ -79,13 +80,13 @@ enum Lines {
                 return r.sorted { $0.0 < $1.0 }.map(\.1)
             }
             out.append(contentsOf: results)
-            i += 6
+            i += 3
         }
         return out
     }
 
     /// 自动切换用：挑一条能用的线路（排除当前这条）。
-    /// 先只测固定线路——两条、够快；固定线路都不行才去拉发布页测镜像。
+    /// 先只测固定线路（官网一条，够快）；固定线路不行才去拉发布页测镜像。
     static func bestLine(excluding current: String, limit: Int = 12) async -> (line: Line, ms: Int)? {
         Net.shared.refreshSession()
         var fixedOthers = fixed.filter { $0.url != current }
@@ -115,9 +116,15 @@ enum Lines {
         var best: (line: Line, ms: Int)?
         var i = 0
         while i < candidates.count {
-            let chunk = Array(candidates[i..<min(i + 6, candidates.count)])
+            // 3 个一组、错开 250ms：并发太高容易被 CDN 当成攻击
+            let chunk = Array(candidates[i..<min(i + 3, candidates.count)])
             let results = await withTaskGroup(of: (Line, Probe).self) { group in
-                for l in chunk { group.addTask { (l, await probeOne(l.url, timeout: timeout)) } }
+                for (k, l) in chunk.enumerated() {
+                    group.addTask {
+                        if k > 0 { try? await Task.sleep(for: .milliseconds(Double(k) * 250)) }
+                        return (l, await probeOne(l.url, timeout: timeout))
+                    }
+                }
                 var out: [(Line, Probe)] = []
                 for await r in group { out.append(r) }
                 return out
